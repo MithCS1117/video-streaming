@@ -1,0 +1,76 @@
+name: release
+on:
+  push:
+    tags:
+    # match semver versions
+    - "v[0-9]+.[0-9]+.[0-9]+"
+    # match semver pre-releases
+    - "v[0-9]+.[0-9]+.[0-9]+-*"
+jobs:
+  release:
+    env:
+      NETLIFY_BASE: 'videojs-http-streaming.netlify.app'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        # We neeed to fetch the entire history as conventional-changelog needs
+        # access to any number of git commits to build the changelog.
+        with:
+          fetch-depth: 0
+
+      - name: read node version from .nvmrc
+        run: echo "NVMRC=$(cat .nvmrc)" >> $GITHUB_OUTPUT
+        shell: bash
+        id: nvm
+
+      - name: setup node
+        uses: actions/setup-node@v3
+        with:
+          node-version: '${{steps.nvm.outputs.NVMRC}}'
+          cache: npm
+          # this line is required for the setup-node action to be able to run the npm publish below.
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: npm install
+        run: npm i --prefer-offline --no-audit
+
+      # publish runs build for us via a prepublishOnly script
+      - name: npm release
+        run: npm publish --tag next
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Check if this is a pre-release
+        run: echo "IS_PRE_RELEASE=$(npx -p not-prerelease is-prerelease && echo "true" || echo "false")" >> $GITHUB_OUTPUT
+        id: pre-release-check
+
+      - name: truncate CHANGELOG.md so that we can get the current versions changes only
+        run: truncate -s 0 CHANGELOG.md
+
+      - name: Generate current release changelog
+        run: npx -p @videojs/update-changelog vjs-update-changelog --run-on-prerelease
+
+      - name: get dashed package version for netlify
+        run: echo "VERSION=$(node -e "process.stdout.write(require('./package.json').version.split('.').join('-'))")" >> $GITHUB_OUTPUT
+        id: get-version
+        shell: bash
+        if: env.NETLIFY_BASE != ''
+
+      - name: add netlify preview to release notes
+        run: |
+          echo "" >> CHANGELOG.md
+          echo "[netlify preview for this version](https://v${{steps.get-version.outputs.VERSION}}--${{env.NETLIFY_BASE}})" >> CHANGELOG.md
+        if: env.NETLIFY_BASE != ''
+
+      - name: Create Github release
+        uses: softprops/action-gh-release@v1
+        with:
+          body_path: CHANGELOG.md
+          token: ${{github.token}}
+          prerelease: ${{steps.pre-release-check.outputs.IS_PRE_RELEASE}}
+          files: |
+            dist/**/*.js
+            dist/**/*.css
+          discussion_category_name: Releases
+
